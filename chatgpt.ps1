@@ -242,13 +242,28 @@ $script:conversation += @{ role="system"; content=$systemPrompt }
 Write-Host "exit | reset | voice | analyze <file> | !run <ps> | tts | pamatuj <text> | nebo se prostě na něco zeptej"
 function UpdateMemory($userText, $assistantText) {
 
-    $memoryCheckPrompt = @"
-Zvaž následující konverzaci a vrať pouze informaci,
-která má dlouhodobou hodnotu pro paměť uživatele.
-Pokud nic důležitého, vrať pouze: NONE
+    $existingMemory = ""
+    if (Test-Path $memoryFile) {
+        $existingMemory = Get-Content $memoryFile -Raw
+    }
 
+    $memoryCheckPrompt = @"
+Máš existující dlouhodobou paměť uživatele:
+
+$existingMemory
+
+Nová konverzace:
 Uživatel: $userText
 Asistent: $assistantText
+
+Úkol:
+1. Aktualizuj paměť podle nových informací.
+2. Pokud se informace změnila, starou nahraď.
+3. Odstraň duplicity.
+4. Ignoruj dočasné informace (den, čas, náladu).
+5. Vrať kompletní novou paměť.
+
+Vrať pouze výslednou paměť.
 "@
 
     $body = @{
@@ -270,14 +285,12 @@ Asistent: $assistantText
         }
     }
 
-    $text = $text.Trim()
-
-    if ($text -and $text -ne "NONE") {
-        Add-Content $memoryFile $text
+    if ($text.Trim().Length -gt 0) {
+        Set-Content $memoryFile $text.Trim()
         Write-Host "[Paměť aktualizována]" -ForegroundColor DarkYellow
     }
-    OptimizeMemory
 }
+
 
 while ($true) {
 
