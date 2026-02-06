@@ -1,11 +1,9 @@
 # ==============================
-# Simple ChatGPT API PowerShell client
+# ChatGPT PowerShell Client
 # ==============================
-# Requirements:
-#   1) Set environment variable OPENAI_API_KEY
-#      PowerShell:
-#      setx OPENAI_API_KEY "YOUR_API_KEY"
-#      (restart terminal after setting)
+# Commands:
+#   exit  - konec
+#   reset - smaže historii
 # ==============================
 
 $apiKey = $env:OPENAI_API_KEY
@@ -15,44 +13,92 @@ if (-not $apiKey) {
 }
 
 $uri = "https://api.openai.com/v1/responses"
+$logFile = ".\chatgpt_log.txt"
+
+# historie konverzace
+$script:conversation = @()
+
+function Get-TimeStamp {
+    return (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+}
+
+function Write-Log {
+    param($Text)
+    Add-Content -Path $logFile -Value $Text
+}
 
 function Ask-ChatGPT {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Prompt
-    )
+    param([string]$Prompt)
 
     $headers = @{
         "Authorization" = "Bearer $apiKey"
         "Content-Type"  = "application/json"
     }
 
+    # uložíme do historie
+    $script:conversation += @{
+        role = "user"
+        content = $Prompt
+    }
+
     $body = @{
         model = "gpt-5.2"
-        input = $Prompt
-    } | ConvertTo-Json -Depth 5
+        input = $script:conversation
+    } | ConvertTo-Json -Depth 10
 
     try {
-        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $body
+        $response = Invoke-RestMethod `
+            -Method Post `
+            -Uri $uri `
+            -Headers $headers `
+            -Body $body
 
-        # Většinou je text v output_text
-        if ($response.output_text) {
-            return $response.output_text
+        # --- Parsování čistého textu ---
+        $textParts = @()
+
+        foreach ($msg in $response.output) {
+            foreach ($part in $msg.content) {
+                if ($part.type -eq "output_text") {
+                    $textParts += $part.text
+                }
+            }
         }
 
-        # fallback pro případ jiné struktury
-        return ($response.output | ConvertTo-Json -Depth 10)
+        $answer = ($textParts -join "`n").Trim()
+
+        # uložit do historie
+        $script:conversation += @{
+            role = "assistant"
+            content = $answer
+        }
+
+        return $answer
     }
     catch {
         Write-Error $_
+        return ""
     }
 }
 
-# ---- jednoduchý interaktivní režim ----
+Write-Host "ChatGPT client ready. Commands: exit, reset"
+
 while ($true) {
-    $q = Read-Host "`nTy"
-    if ($q -in @("exit","quit","q")) { break }
+    $time = Get-TimeStamp
+    $q = Read-Host "`n[$time] Ty"
+
+    if ($q -eq "exit") { break }
+
+    if ($q -eq "reset") {
+        $conversation = @()
+        Write-Host "Historie smazána."
+        continue
+    }
+
+    Write-Log "[$time] USER: $q"
 
     $answer = Ask-ChatGPT -Prompt $q
-    Write-Host "`nChatGPT:`n$answer"
+    $time = Get-TimeStamp
+
+    Write-Host "`n[$time] ChatGPT:`n$answer"
+    Write-Log "[$time] GPT: $answer"
 }
