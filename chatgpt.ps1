@@ -1,9 +1,11 @@
 # ==============================
-# ChatGPT PowerShell Client
+# ChatGPT API PowerShell client
 # ==============================
-# Commands:
-#   exit  - konec
-#   reset - smaže historii
+# Requirements:
+#   1) Set environment variable OPENAI_API_KEY
+#      PowerShell:
+#      setx OPENAI_API_KEY "YOUR_API_KEY"
+#      (restart terminal after setting)
 # ==============================
 
 $apiKey = $env:OPENAI_API_KEY
@@ -191,6 +193,43 @@ Write-Host "Prvotní prompt: `n$systemPrompt`n" -ForegroundColor Yellow
 $script:conversation += @{ role="system"; content=$systemPrompt }
 
 Write-Host "exit | reset | voice | analyze <file> | !run <ps> | tts | pamatuj <text> | nebo se prostě na něco zeptej"
+function UpdateMemory($userText, $assistantText) {
+
+    $memoryCheckPrompt = @"
+Zvaž následující konverzaci a vrať pouze informaci,
+která má dlouhodobou hodnotu pro paměť uživatele.
+Pokud nic důležitého, vrať pouze: NONE
+
+Uživatel: $userText
+Asistent: $assistantText
+"@
+
+    $body = @{
+        model="gpt-5.2"
+        input=$memoryCheckPrompt
+    } | ConvertTo-Json -Depth 5
+
+    $response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{
+        Authorization = "Bearer $apiKey"
+        "Content-Type"="application/json"
+    } -Body $body
+
+    $text = ""
+    foreach ($m in $response.output) {
+        foreach ($p in $m.content) {
+            if ($p.type -eq "output_text") {
+                $text += $p.text
+            }
+        }
+    }
+
+    $text = $text.Trim()
+
+    if ($text -and $text -ne "NONE") {
+        Add-Content $memoryFile $text
+        Write-Host "[Paměť aktualizována]" -ForegroundColor DarkYellow
+    }
+}
 
 while ($true) {
 
@@ -233,6 +272,7 @@ while ($true) {
     Log "USER: $inputText"
     $memory = $(LoadMemory)
     $answer = Ask-ChatGPT $inputText
+    UpdateMemory $inputText $answer
 
     Write-Host "[$(TimeNow)] GPT: $answer" -ForegroundColor Cyan
     Log "GPT: $answer"
