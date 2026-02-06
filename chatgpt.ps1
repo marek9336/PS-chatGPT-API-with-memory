@@ -98,7 +98,7 @@ function SummarizeIfLong {
     if ($script:conversation.Count -lt 20) { return }
 
     Write-Host "Shrnuji historii..."
-    $summary = Ask-ChatGPT "Shrň dosavadní konverzaci stručně do paměti."
+    $summary = Ask-ChatGPT "Shrň dosavadní konverzaci stručně do paměti. Ignoruj dočasné informace jako den, čas nebo náladu. Zachovej veškeré informace o uživateli, dělej mu postupné CV celého jeho života. Zaznamenávej veškerá zařízení, které uživatel kdy použil."
     Add-Content $memoryFile "`n$summary`n"
     $script:conversation = @()
 }
@@ -117,8 +117,9 @@ function OptimizeMemory {
     $joined = $lines -join "`n"
 
     $prompt = @"
-Shrň následující paměť uživatele do stručné,
-dlouhodobé technické paměti. Zachovej jen důležité věci.
+Shrň následující informace do krátké dlouhodobé paměti uživatele.
+Odstraň duplicity a zachovej jen důležité informace.
+Výstup napiš jako několik stručných vět.
 
 $joined
 "@
@@ -142,10 +143,12 @@ $joined
         }
     }
 
+    # 🔥 přepsání celé paměti
     Set-Content $memoryFile $text.Trim()
 
-    Write-Host "[Paměť optimalizována]" -ForegroundColor DarkYellow
+    Write-Host "[Paměť přepsána optimalizovanou verzí]" -ForegroundColor DarkYellow
 }
+
 
 function StreamRequest($bodyJson) {
     $client = [System.Net.Http.HttpClient]::new()
