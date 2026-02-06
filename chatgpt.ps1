@@ -27,6 +27,7 @@ if (!(Test-Path $memoryFile)) {
     New-Item $memoryFile -ItemType File | Out-Null
 }
 $cacheFile = ".\cache.json"
+$memoryMaxLines = 100
 
 $script:conversation = @()
 $script:cache = @{}
@@ -54,7 +55,6 @@ function Speak($text) {
 
     $synth.SpeakAsync($text) | Out-Null
 }
-
 
 function VoiceInput {
     try {
@@ -101,6 +101,50 @@ function SummarizeIfLong {
     $summary = Ask-ChatGPT "Shrň dosavadní konverzaci stručně do paměti."
     Add-Content $memoryFile "`n$summary`n"
     $script:conversation = @()
+}
+function OptimizeMemory {
+
+    if (!(Test-Path $memoryFile)) { return }
+
+    $lines = Get-Content $memoryFile |
+             Where-Object { $_.Trim() -ne "" } |
+             Select-Object -Unique
+
+    if ($lines.Count -lt $memoryMaxLines) { return }
+
+    Write-Host "[Optimalizuji paměť...]" -ForegroundColor DarkYellow
+
+    $joined = $lines -join "`n"
+
+    $prompt = @"
+Shrň následující paměť uživatele do stručné,
+dlouhodobé technické paměti. Zachovej jen důležité věci.
+
+$joined
+"@
+
+    $body = @{
+        model="gpt-5.2"
+        input=$prompt
+    } | ConvertTo-Json -Depth 5
+
+    $response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{
+        Authorization = "Bearer $apiKey"
+        "Content-Type"="application/json"
+    } -Body $body
+
+    $text = ""
+    foreach ($m in $response.output) {
+        foreach ($p in $m.content) {
+            if ($p.type -eq "output_text") {
+                $text += $p.text
+            }
+        }
+    }
+
+    Set-Content $memoryFile $text.Trim()
+
+    Write-Host "[Paměť optimalizována]" -ForegroundColor DarkYellow
 }
 
 function StreamRequest($bodyJson) {
@@ -229,6 +273,7 @@ Asistent: $assistantText
         Add-Content $memoryFile $text
         Write-Host "[Paměť aktualizována]" -ForegroundColor DarkYellow
     }
+    OptimizeMemory
 }
 
 while ($true) {
