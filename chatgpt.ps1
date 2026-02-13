@@ -29,6 +29,11 @@ if (!(Test-Path $memoryFile)) {
 $cacheFile = ".\cache.json"
 $memoryMaxLines = 100
 
+# notes support
+$notesFile = ".\notes.txt"
+if (!(Test-Path $notesFile)) { New-Item $notesFile -ItemType File | Out-Null }
+$script:noteMode = $false
+
 $script:conversation = @()
 $script:cache = @{}
 
@@ -219,6 +224,14 @@ function AnalyzeFile($path) {
     Ask-ChatGPT "Analyzuj tento obsah:`n$content"
 }
 
+function Add-Note($text) {
+    # Use ChatGPT to create a concise summary of the note
+    $prompt = "Shrň následující poznámku uživatele stručně tak, aby se hodila do osobních poznámek nebo TODO listu:`n$text"
+    $summary = Ask-ChatGPT $prompt
+    Add-Content $notesFile $summary
+    Write-Host "[Poznámka uložena]: $summary" -ForegroundColor Yellow
+}
+
 # ---- start ----
 
 Write-Host "=== ChatGPT PowerShell Copilot ==="
@@ -239,7 +252,7 @@ Write-Host "Prvotní prompt: `n$systemPrompt`n" -ForegroundColor Yellow
 
 $script:conversation += @{ role="system"; content=$systemPrompt }
 
-Write-Host "exit | reset | voice | analyze <file> | !run <ps> | tts | pamatuj <text> | nebo se prostě na něco zeptej"
+Write-Host "exit | reset | voice | analyze <file> | !run <ps> | tts | pamatuj <text> | poznámka <text> | poznámky on/off | nebo se prostě na něco zeptej"
 function UpdateMemory($userText, $assistantText) {
 
     $existingMemory = ""
@@ -325,6 +338,29 @@ while ($true) {
     if ($inputText.StartsWith("pamatuj")) {
         Add-Content $memoryFile ($inputText.Substring(7))
         Write-Host "Uloženo do paměti."
+        continue
+    }
+
+    # notes commands
+    if ($inputText -match '^(poznámky|notes)\s+on$') {
+        $script:noteMode = $true
+        Write-Host "Režim poznámek zapnut" -ForegroundColor DarkYellow
+        continue
+    }
+    if ($inputText -match '^(poznámky|notes)\s+off$') {
+        $script:noteMode = $false
+        Write-Host "Režim poznámek vypnut" -ForegroundColor DarkYellow
+        continue
+    }
+    if ($inputText -match '^(poznámka|note)\s+' ) {
+        $noteText = $inputText -replace '^(poznámka|note)\s+',''
+        Add-Note $noteText
+        continue
+    }
+
+    if ($script:noteMode) {
+        # every line becomes a summarized note
+        Add-Note $inputText
         continue
     }
 
