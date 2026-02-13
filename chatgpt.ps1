@@ -10,7 +10,7 @@
 
 $apiKey = $env:OPENAI_API_KEY
 if (-not $apiKey) {
-    Write-Error "OPENAI_API_KEY not set"
+    Write-Error "OPENAI_API_KEY not set. use command via Powershell and restart terminal: setx OPENAI_API_KEY "YOUR_API_KEY""
     exit 1
 }
 
@@ -354,6 +354,7 @@ while ($true) {
     if ($inputText -match '^(pamatuj|remember)\s+') {
         $arg = $inputText -replace '^(pamatuj|remember)\s+',''
         Add-Content $memoryFile $arg
+        $memory = $(LoadMemory)
         Write-Host "Uloženo do paměti."
         continue
     }
@@ -409,6 +410,7 @@ while ($true) {
     }
     if ($inputText.StartsWith("pamatuj")) {
         Add-Content $memoryFile ($inputText.Substring(7))
+        $memory = $(LoadMemory)
         Write-Host "Uloženo do paměti."
         continue
     }
