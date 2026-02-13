@@ -252,7 +252,22 @@ Write-Host "Prvotní prompt: `n$systemPrompt`n" -ForegroundColor Yellow
 
 $script:conversation += @{ role="system"; content=$systemPrompt }
 
-Write-Host "exit | reset | voice | analyze <file> | !run <ps> | tts | pamatuj <text> | poznámka <text> | poznámky on/off | nebo se prostě na něco zeptej"
+function Show-Help {
+    Write-Host "Dostupné příkazy / Available commands:" -ForegroundColor Cyan
+    Write-Host "  exit                - ukončí program / exit the client"
+    Write-Host "  reset               - vymaže konverzační historii / clear conversation history"
+    Write-Host "  voice / hlas        - zapne hlasový vstup / toggle voice input"
+    Write-Host "  analyze / analyzuj <file>    - analyzuj obsah souboru / analyze file contents"
+    Write-Host "  !run <ps>           - spusť PS příkaz / execute PowerShell expression"
+    Write-Host "  tts                 - přepíná text-to-speech (řeč) / toggle text-to-speech"
+    Write-Host "  pamatuj / remember <text>    - přidej text do dlouhodobé paměti / add text to memory"
+    Write-Host "  poznámka / note <text>       - přidej shrnutou poznámku / add a summarized note"
+    Write-Host "  poznámky / notes on/off      - režim automatického zapisování poznámek / notes mode on/off"
+    Write-Host "  help / nápověda      - zobrazí tuto nápovědu / show help"
+    Write-Host "  (any other text is sent to GPT)" 
+}
+
+Write-Host "exit/ukonči | reset/vymaž | voice/hlas | analyze/analyzuj <file> | !run <ps> | tts | pamatuj/remember <text> | poznámka/note <text> | poznámky/notes on/off | help/nápověda | nebo se prostě na něco zeptej"
 function UpdateMemory($userText, $assistantText) {
 
     $existingMemory = ""
@@ -308,6 +323,63 @@ Vrať pouze výslednou paměť.
 while ($true) {
 
     $inputText = Read-Host
+    if ($inputText -match '^(help|nápověda)$') {
+        Show-Help
+        continue
+    }
+    # english/czech aliases
+    if ($inputText -match '^(exit|ukonči)$') { break }
+    if ($inputText -match '^(reset|vymaž)$') {
+        $script:conversation = @()
+        continue
+    }
+    if ($inputText -match '^(voice|hlas)$') {
+        $inputText = VoiceInput
+        Write-Host "Rozpoznáno: $inputText"
+    }
+    if ($inputText -match '^(analyze|analyzuj)\s+') {
+        $arg = $inputText -replace '^(analyze|analyzuj)\s+',''
+        AnalyzeFile $arg
+        continue
+    }
+    if ($inputText -match '^!run\s+') {
+        Invoke-Expression ($inputText.Substring(5))
+        continue
+    }
+    if ($inputText -eq 'tts') {
+        $script:ttsEnabled = -not $script:ttsEnabled
+        Write-Host "TTS:" ($script:ttsEnabled ? "ON" : "OFF")
+        continue
+    }
+    if ($inputText -match '^(pamatuj|remember)\s+') {
+        $arg = $inputText -replace '^(pamatuj|remember)\s+',''
+        Add-Content $memoryFile $arg
+        Write-Host "Uloženo do paměti."
+        continue
+    }
+
+    # notes commands
+    if ($inputText -match '^(poznámky|notes)\s+on$') {
+        $script:noteMode = $true
+        Write-Host "Režim poznámek zapnut" -ForegroundColor DarkYellow
+        continue
+    }
+    if ($inputText -match '^(poznámky|notes)\s+off$') {
+        $script:noteMode = $false
+        Write-Host "Režim poznámek vypnut" -ForegroundColor DarkYellow
+        continue
+    }
+    if ($inputText -match '^(poznámka|note)\s+' ) {
+        $noteText = $inputText -replace '^(poznámka|note)\s+',''
+        Add-Note $noteText
+        continue
+    }
+
+    if ($script:noteMode) {
+        # every line becomes a summarized note
+        Add-Note $inputText
+        continue
+    }
 
     if ($inputText -eq "exit") { break }
 
