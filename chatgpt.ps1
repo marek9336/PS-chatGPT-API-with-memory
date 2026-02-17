@@ -32,10 +32,15 @@ $memoryMaxLines = 100
 # notes support
 $notesFile = ".\notes.txt"
 if (!(Test-Path $notesFile)) { New-Item $notesFile -ItemType File | Out-Null }
+$diagnosticsContextFile = ".\diagnostics_context.txt"
+if (!(Test-Path $diagnosticsContextFile)) { New-Item $diagnosticsContextFile -ItemType File | Out-Null }
+$commandsHistoryFile = ".\commands_history.log"
+if (!(Test-Path $commandsHistoryFile)) { New-Item $commandsHistoryFile -ItemType File | Out-Null }
 $script:noteMode = $false
 
 $script:conversation = @()
 $script:cache = @{}
+$script:contextFingerprint = ""
 
 if (Test-Path $cacheFile) {
     $script:cache = Get-Content $cacheFile | ConvertFrom-Json -AsHashtable
@@ -83,6 +88,68 @@ function LoadMemory {
     return ""
 }
 
+function LoadDiagnosticsContext([int]$maxChars = 6000) {
+    if (!(Test-Path $diagnosticsContextFile)) { return "" }
+    $raw = Get-Content $diagnosticsContextFile -Raw
+    if (-not $raw) { return "" }
+    if ($raw.Length -le $maxChars) { return $raw }
+    return $raw.Substring($raw.Length - $maxChars)
+}
+
+function LoadCommandsHistory([int]$maxChars = 2500) {
+    if (!(Test-Path $commandsHistoryFile)) { return "" }
+    $raw = Get-Content $commandsHistoryFile -Raw
+    if (-not $raw) { return "" }
+    if ($raw.Length -le $maxChars) { return $raw }
+    return $raw.Substring($raw.Length - $maxChars)
+}
+
+function Get-ContextFingerprint {
+    $memStamp = 0
+    $diagStamp = 0
+    $cmdStamp = 0
+    if (Test-Path $memoryFile) { $memStamp = (Get-Item $memoryFile).LastWriteTimeUtc.Ticks }
+    if (Test-Path $diagnosticsContextFile) { $diagStamp = (Get-Item $diagnosticsContextFile).LastWriteTimeUtc.Ticks }
+    if (Test-Path $commandsHistoryFile) { $cmdStamp = (Get-Item $commandsHistoryFile).LastWriteTimeUtc.Ticks }
+    return "$memStamp-$diagStamp-$cmdStamp"
+}
+
+function Build-SystemPrompt {
+    $memory = LoadMemory
+    $diagContext = LoadDiagnosticsContext
+    $recentCommands = LoadCommandsHistory
+    if (-not $diagContext) { $diagContext = "Zatím bez diagnostického souhrnu." }
+    if (-not $recentCommands) { $recentCommands = "Zatím bez historie příkazů." }
+
+    return @"
+Jsi CLI admin copilot. Pomáhej stručně, technicky a prakticky.
+Paměť uživatele:
+$memory
+
+Kontext posledních diagnostik a důležitých kroků:
+$diagContext
+
+Nedávno použité příkazy (pro navázání kontextu):
+$recentCommands
+"@
+}
+
+function Refresh-SystemPromptInConversation {
+    $prompt = Build-SystemPrompt
+    $script:contextFingerprint = Get-ContextFingerprint
+
+    if ($script:conversation.Count -gt 0 -and $script:conversation[0].role -eq "system") {
+        $script:conversation[0] = @{ role="system"; content=$prompt }
+    } else {
+        $script:conversation = @(@{ role="system"; content=$prompt }) + $script:conversation
+    }
+}
+
+function Log-UserCommand($text) {
+    if ([string]::IsNullOrWhiteSpace($text)) { return }
+    Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] INPUT: $text"
+}
+
 function SaveCache {
     $script:cache | ConvertTo-Json | Set-Content $cacheFile
 }
@@ -106,6 +173,7 @@ function SummarizeIfLong {
     $summary = Ask-ChatGPT "Shrň dosavadní konverzaci stručně do paměti. Ignoruj dočasné informace jako den, čas nebo náladu. Zachovej veškeré informace o uživateli, dělej mu postupné CV celého jeho života. Zaznamenávej veškerá zařízení, které uživatel kdy použil."
     Add-Content $memoryFile "`n$summary`n"
     $script:conversation = @()
+    Refresh-SystemPromptInConversation
 }
 function OptimizeMemory {
 
@@ -187,9 +255,11 @@ function StreamRequest($bodyJson) {
 }
 
 function Ask-ChatGPT($prompt) {
+    Refresh-SystemPromptInConversation
+    $cacheKey = "$($script:contextFingerprint)||$prompt"
 
-    if ($script:cache.ContainsKey($prompt)) {
-        return $script:cache[$prompt]
+    if ($script:cache.ContainsKey($cacheKey)) {
+        return $script:cache[$cacheKey]
     }
 
     $script:conversation += @{ role="user"; content=$prompt }
@@ -206,7 +276,7 @@ function Ask-ChatGPT($prompt) {
 
     $script:conversation += @{ role="assistant"; content=$answer }
 
-    $script:cache[$prompt] = $answer
+    $script:cache[$cacheKey] = $answer
     SaveCache
 
     SummarizeIfLong
@@ -273,7 +343,7 @@ function Get-DangerousPatternHit($command) {
     if ([string]::IsNullOrWhiteSpace($command)) { return $null }
     $normalizedCommand = Get-NormalizedFixCommand $command
     $blockedPatterns = @(
-        '(?i)\bformat\b',
+        '(?im)(?:^|[;|&]\s*)format(?:\.com|\.exe)?(?:\s|$)',
         '(?i)\bdiskpart\b',
         '(?i)\bvssadmin\s+delete\b',
         '(?i)\bcipher\s+/w\b',
@@ -453,6 +523,49 @@ $context
     return (Invoke-OpenAIText $prompt)
 }
 
+function Update-DiagnosticsContextFromRun($diagDir, $userIssue, $analysis, $finalReview) {
+    $analysisText = ""
+    if ($analysis) {
+        $analysisText = $analysis | ConvertTo-Json -Depth 10
+    }
+
+    $fixLog = ""
+    $fixLogPath = Join-Path $diagDir "fix_actions.log"
+    if (Test-Path $fixLogPath) {
+        $fixLog = Get-Content $fixLogPath -Raw -ErrorAction SilentlyContinue
+    }
+
+    $prompt = @"
+Vytvoř stručný trvalý kontext pro další konverzaci admin asistenta.
+Napiš česky max 10 řádků:
+- hlavní problém
+- nejdůležitější důkazy
+- jaké kroky byly provedeny / přeskočeny
+- co dělat dál
+
+Issue:
+$userIssue
+
+Analysis JSON:
+$analysisText
+
+Fix log:
+$fixLog
+
+Final review:
+$finalReview
+"@
+
+    $contextSummary = Invoke-OpenAIText $prompt
+    $entry = @"
+[$(Get-Date -Format s)] Diagnostika: $diagDir
+$contextSummary
+
+"@
+    Add-Content $diagnosticsContextFile $entry
+    Set-Content (Join-Path $diagDir "context_update.txt") $contextSummary
+}
+
 function Parse-JsonResponse($text) {
     $clean = $text.Trim()
     if ($clean.StartsWith('```')) {
@@ -531,6 +644,7 @@ function Apply-DiagnosticActions($analysis, $diagDir) {
         $approve = Read-Host "Provést tento krok? (ano/ne)"
         if ($approve -notmatch '^(a|ano|y|yes)$') {
             Add-Content $fixLog "[$($action.id)] SKIPPED by user"
+            Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] DIAG-SKIP [$($action.id)]: $($action.command)"
             continue
         }
 
@@ -541,6 +655,7 @@ function Apply-DiagnosticActions($analysis, $diagDir) {
             $dangerApprove = Read-Host "I přesto chceš příkaz spustit? (ano/ne)"
             if ($dangerApprove -notmatch '^(a|ano|y|yes)$') {
                 Add-Content $fixLog "[$($action.id)] SKIPPED: dangerous pattern rejected"
+                Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] DIAG-SKIP-DANGER [$($action.id)]: $($action.command)"
                 continue
             }
         }
@@ -555,23 +670,27 @@ function Apply-DiagnosticActions($analysis, $diagDir) {
                     $execCommand = "sudo $normalizedCommand"
                 } else {
                     Add-Content $fixLog "[$($action.id)] SKIPPED: sudo declined"
+                    Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] DIAG-SKIP-SUDO [$($action.id)]: $($action.command)"
                     continue
                 }
             } else {
                 Write-Host "Tento krok vyžaduje administrátora a 'sudo' není dostupné. Přeskakuji." -ForegroundColor Yellow
                 Add-Content $fixLog "[$($action.id)] SKIPPED: admin required and sudo unavailable"
+                Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] DIAG-SKIP-ADMIN [$($action.id)]: $($action.command)"
                 continue
             }
         }
 
         try {
             Add-Content $fixLog "[$($action.id)] EXECUTING: $execCommand"
+            Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] DIAG-EXEC [$($action.id)]: $execCommand"
             $result = Invoke-Expression $execCommand 2>&1 | Out-String
             Add-Content $fixLog $result
             Write-Host "Krok proveden." -ForegroundColor Green
         } catch {
             $err = $_ | Out-String
             Add-Content $fixLog "[$($action.id)] ERROR: $err"
+            Add-Content $commandsHistoryFile "[$(Get-Date -Format s)] DIAG-ERROR [$($action.id)]: $execCommand"
             Write-Host "Krok selhal, detail ve fix_actions.log" -ForegroundColor Red
         }
     }
@@ -625,6 +744,10 @@ function Start-WindowsDiagnostics($userIssue = "") {
     Write-Host "Závěrečné zhodnocení:" -ForegroundColor Cyan
     Write-Host $finalReview
 
+    Update-DiagnosticsContextFromRun -diagDir $diagDir -userIssue $userIssue -analysis $analysis -finalReview $finalReview
+    Refresh-SystemPromptInConversation
+    Write-Host "[Diagnostický kontext byl uložen pro další konverzaci]" -ForegroundColor DarkYellow
+
     Write-Host "Hotovo. Kompletní podklady: $diagDir" -ForegroundColor Green
 }
 
@@ -636,17 +759,8 @@ if (Test-Path $logFile) {
     Get-Content $logFile
 }
 
-$memory = $(LoadMemory)
-
-$systemPrompt = @"
-Jsi CLI admin copilot. Pomáhej stručně, technicky a prakticky.
-Paměť uživatele:
-$memory
-"@
-
-Write-Host "Prvotní prompt: `n$systemPrompt`n" -ForegroundColor Yellow
-
-$script:conversation += @{ role="system"; content=$systemPrompt }
+Refresh-SystemPromptInConversation
+Write-Host "Prvotní prompt: `n$($script:conversation[0].content)`n" -ForegroundColor Yellow
 
 function Show-Help {
     Write-Host "Dostupné příkazy / Available commands:" -ForegroundColor Cyan
@@ -720,6 +834,7 @@ Vrať pouze výslednou paměť.
 while ($true) {
 
     $inputText = Read-Host
+    Log-UserCommand $inputText
     if ($inputText -match '^(help|nápověda)$') {
         Show-Help
         continue
@@ -728,6 +843,7 @@ while ($true) {
     if ($inputText -match '^(exit|ukonči)$') { break }
     if ($inputText -match '^(reset|vymaž)$') {
         $script:conversation = @()
+        Refresh-SystemPromptInConversation
         continue
     }
     if ($inputText -match '^(voice|hlas)$') {
@@ -756,7 +872,7 @@ while ($true) {
     if ($inputText -match '^(pamatuj|remember)\s+') {
         $arg = $inputText -replace '^(pamatuj|remember)\s+',''
         Add-Content $memoryFile $arg
-        $memory = $(LoadMemory)
+        Refresh-SystemPromptInConversation
         Write-Host "Uloženo do paměti."
         continue
     }
@@ -793,6 +909,7 @@ while ($true) {
 
     if ($inputText -eq "reset") {
         $script:conversation = @()
+        Refresh-SystemPromptInConversation
         continue
     }
 
@@ -812,7 +929,7 @@ while ($true) {
     }
     if ($inputText.StartsWith("pamatuj")) {
         Add-Content $memoryFile ($inputText.Substring(7))
-        $memory = $(LoadMemory)
+        Refresh-SystemPromptInConversation
         Write-Host "Uloženo do paměti."
         continue
     }
@@ -843,7 +960,6 @@ while ($true) {
 
     Write-Host "[$(TimeNow)] Ty: $inputText" -ForegroundColor Green
     Log "USER: $inputText"
-    $memory = $(LoadMemory)
     $answer = Ask-ChatGPT $inputText
     UpdateMemory $inputText $answer
 
