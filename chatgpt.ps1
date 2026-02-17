@@ -260,19 +260,18 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Is-SafeFixCommand($command) {
-    if ([string]::IsNullOrWhiteSpace($command)) { return $false }
+function Get-NormalizedFixCommand($command) {
+    if ([string]::IsNullOrWhiteSpace($command)) { return "" }
+    return ($command.Trim() -replace '^(?i)sudo\s+', '')
+}
 
-    $firstToken = ($command.Trim() -split '\s+')[0]
-    $allowed = @(
-        "pnputil", "dism", "sfc", "chkdsk", "sc", "netsh", "reg",
-        "Set-Service", "Restart-Service", "Stop-Service", "Start-Service",
-        "Enable-NetAdapter", "Disable-NetAdapter", "ipconfig",
-        "Enable-WindowsOptionalFeature", "Disable-WindowsOptionalFeature"
-    )
+function Test-SudoAvailable {
+    return [bool](Get-Command sudo -ErrorAction SilentlyContinue)
+}
 
-    if ($firstToken -notin $allowed) { return $false }
-
+function Get-DangerousPatternHit($command) {
+    if ([string]::IsNullOrWhiteSpace($command)) { return $null }
+    $normalizedCommand = Get-NormalizedFixCommand $command
     $blockedPatterns = @(
         '(?i)\bformat\b',
         '(?i)\bdiskpart\b',
@@ -287,10 +286,9 @@ function Is-SafeFixCommand($command) {
     )
 
     foreach ($pattern in $blockedPatterns) {
-        if ($command -match $pattern) { return $false }
+        if ($normalizedCommand -match $pattern) { return $pattern }
     }
-
-    return $true
+    return $null
 }
 
 function Collect-WindowsDiagnostics($userIssue = "") {
@@ -400,6 +398,61 @@ function Build-DiagnosticsContext($diagDir) {
     return $builder.ToString()
 }
 
+function Build-DiagnosticsFolderReviewContext($diagDir) {
+    $maxChars = 160000
+    $builder = New-Object System.Text.StringBuilder
+    $extensions = @(".txt", ".log", ".json", ".csv", ".error")
+
+    $files = Get-ChildItem -Path $diagDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($extensions -contains $_.Extension.ToLowerInvariant()) -or
+            $_.Name -match '\.error\.txt$'
+        } |
+        Sort-Object Length
+
+    foreach ($file in $files) {
+        if ($builder.Length -ge $maxChars) { break }
+        if ($file.Length -gt 2MB) { continue }
+
+        $raw = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+        if (-not $raw) { continue }
+
+        $relative = $file.FullName.Replace("$diagDir\", "")
+        $remaining = $maxChars - $builder.Length
+        if ($remaining -le 0) { break }
+
+        if ($raw.Length -gt $remaining) {
+            $raw = $raw.Substring(0, $remaining)
+        }
+
+        [void]$builder.AppendLine("===== FILE: $relative =====")
+        [void]$builder.AppendLine($raw)
+        [void]$builder.AppendLine("")
+    }
+
+    return $builder.ToString()
+}
+
+function Final-ReviewDiagnosticsFolder($diagDir, $userIssue = "") {
+    $context = Build-DiagnosticsFolderReviewContext $diagDir
+    $prompt = @"
+Jsi senior Windows diagnostik.
+Projdi obsah diagnostické složky a napiš česky:
+1) Co je nejpravděpodobnější problém.
+2) Jaké důkazy v logách to potvrzují (uveď i konkrétní soubory a klíčové události).
+3) Co by se mělo udělat dál jako další 3 konkrétní kroky.
+
+Buď konkrétní a technický. Pokud něco chybí, napiš přesně co chybí.
+
+Popis problému od uživatele:
+$userIssue
+
+Obsah diagnostické složky:
+$context
+"@
+    return (Invoke-OpenAIText $prompt)
+}
+
 function Parse-JsonResponse($text) {
     $clean = $text.Trim()
     if ($clean.StartsWith('```')) {
@@ -481,23 +534,39 @@ function Apply-DiagnosticActions($analysis, $diagDir) {
             continue
         }
 
-        if (-not (Is-SafeFixCommand $action.command)) {
-            Write-Host "Blokuji akci: příkaz není v povoleném bezpečném seznamu." -ForegroundColor Red
-            Add-Content $fixLog "[$($action.id)] BLOCKED: unsafe command: $($action.command)"
-            continue
+        $normalizedCommand = Get-NormalizedFixCommand $action.command
+        $dangerHit = Get-DangerousPatternHit $normalizedCommand
+        if ($dangerHit) {
+            Write-Host "Varování: příkaz obsahuje rizikový vzor ($dangerHit)." -ForegroundColor Red
+            $dangerApprove = Read-Host "I přesto chceš příkaz spustit? (ano/ne)"
+            if ($dangerApprove -notmatch '^(a|ano|y|yes)$') {
+                Add-Content $fixLog "[$($action.id)] SKIPPED: dangerous pattern rejected"
+                continue
+            }
         }
 
         $needsAdmin = $false
         try { $needsAdmin = [bool]$action.requires_admin } catch {}
+        $execCommand = $normalizedCommand
         if ($needsAdmin -and -not $isAdmin) {
-            Write-Host "Tento krok vyžaduje spuštění PowerShellu jako Administrátor. Přeskakuji." -ForegroundColor Yellow
-            Add-Content $fixLog "[$($action.id)] SKIPPED: admin required"
-            continue
+            if (Test-SudoAvailable) {
+                $sudoApprove = Read-Host "Krok vyžaduje admin práva. Spustit přes sudo? (ano/ne)"
+                if ($sudoApprove -match '^(a|ano|y|yes)$') {
+                    $execCommand = "sudo $normalizedCommand"
+                } else {
+                    Add-Content $fixLog "[$($action.id)] SKIPPED: sudo declined"
+                    continue
+                }
+            } else {
+                Write-Host "Tento krok vyžaduje administrátora a 'sudo' není dostupné. Přeskakuji." -ForegroundColor Yellow
+                Add-Content $fixLog "[$($action.id)] SKIPPED: admin required and sudo unavailable"
+                continue
+            }
         }
 
         try {
-            Add-Content $fixLog "[$($action.id)] EXECUTING: $($action.command)"
-            $result = Invoke-Expression $action.command 2>&1 | Out-String
+            Add-Content $fixLog "[$($action.id)] EXECUTING: $execCommand"
+            $result = Invoke-Expression $execCommand 2>&1 | Out-String
             Add-Content $fixLog $result
             Write-Host "Krok proveden." -ForegroundColor Green
         } catch {
@@ -547,6 +616,14 @@ function Start-WindowsDiagnostics($userIssue = "") {
     } else {
         Write-Host "GPT nenašel automaticky řešitelný krok." -ForegroundColor Yellow
     }
+
+    Write-Host ""
+    Write-Host "Finální revize celé diagnostické složky..." -ForegroundColor DarkYellow
+    $finalReview = Final-ReviewDiagnosticsFolder -diagDir $diagDir -userIssue $userIssue
+    Set-Content (Join-Path $diagDir "final_review.txt") $finalReview
+    Write-Host ""
+    Write-Host "Závěrečné zhodnocení:" -ForegroundColor Cyan
+    Write-Host $finalReview
 
     Write-Host "Hotovo. Kompletní podklady: $diagDir" -ForegroundColor Green
 }
