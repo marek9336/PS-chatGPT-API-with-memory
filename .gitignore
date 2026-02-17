@@ -3,3 +3,4 @@ cache.json
 notes.txt
 
 *.log
+diagnostics/
